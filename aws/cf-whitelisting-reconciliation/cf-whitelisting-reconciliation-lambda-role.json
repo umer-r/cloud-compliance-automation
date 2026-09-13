@@ -1,0 +1,49 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "CloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": [
+                "arn:aws:logs:eu-west-2:<acc_id>:log-group:/aws/lambda/cf-whitelisting-reconciliation",
+                "arn:aws:logs:eu-west-2:<acc_id>:log-group:/aws/lambda/cf-whitelisting-reconciliation:*"
+            ]
+        },
+        {
+            "Sid": "DescribePrefixLists",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeManagedPrefixLists",
+                "ec2:GetManagedPrefixListEntries"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "ModifyCloudflarePrefixLists",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:ModifyManagedPrefixList",
+                "ec2:CreateTags"
+            ],
+            "Resource": [
+                "arn:aws:ec2:eu-west-2:<acc_id>:prefix-list/pl-id",
+                "arn:aws:ec2:eu-west-2:<acc_id>:prefix-list/pl-id"
+            ]
+        },
+        {
+            "Sid": "PublishToSNSTopic",
+            "Effect": "Allow",
+            "Action": [
+                "sns:Publish"
+            ],
+            "Resource": [
+                "arn:aws:sns:eu-west-2:<acc_id>:<sns-topic>"
+            ]
+        }
+    ]
+}

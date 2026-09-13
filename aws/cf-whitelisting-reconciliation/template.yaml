@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud Compliance Automation: Automated Cloudflare IP Range Whitelisting via 
+  AWS Customer-Managed Prefix Lists, EventBridge Scheduler, and SNS Alerting.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Lambda Deployment Package
+        Parameters:
+          - LambdaCodeS3Bucket
+          - LambdaCodeS3Key
+      - Label:
+          default: Prefix List Configuration
+        Parameters:
+          - CreatePrefixLists
+          - ExistingPrefixListIdV4
+          - ExistingPrefixListIdV6
+          - PrefixListNameIPv4
+          - PrefixListNameIPv6
+          - MaxEntriesIPv4
+          - MaxEntriesIPv6
+      - Label:
+          default: Automation & Safety Settings
+        Parameters:
+          - ScheduleExpression
+          - SafetyThreshold
+          - NotificationEmail
+          - LambdaFunctionName
+          - LogRetentionDays
+
+Parameters:
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket name where the Lambda deployment zip package is hosted.
+
+  LambdaCodeS3Key:
+    Type: String
+    Default: cf-whitelisting-reconciliation.zip
+    Description: S3 object key (path) for the Lambda deployment zip package.
+
+  CreatePrefixLists:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Set to 'true' to create new Customer-Managed Prefix Lists, or 'false' to use existing ones.
+
+  ExistingPrefixListIdV4:
+    Type: String
+    Default: ''
+    Description: (Required if CreatePrefixLists is false) Existing IPv4 Managed Prefix List ID (e.g., pl-0e4939794c9029a4d).
+
+  ExistingPrefixListIdV6:
+    Type: String
+    Default: ''
+    Description: (Required if CreatePrefixLists is false) Existing IPv6 Managed Prefix List ID (e.g., pl-0ff9e6ae255598128).
+
+  PrefixListNameIPv4:
+    Type: String
+    Default: pl-cloudflare-ipv4
+    Description: Name for the IPv4 Customer-Managed Prefix List (if created by stack).
+
+  PrefixListNameIPv6:
+    Type: String
+    Default: pl-cloudflare-ipv6
+    Description: Name for the IPv6 Customer-Managed Prefix List (if created by stack).
+
+  MaxEntriesIPv4:
+    Type: Number
+    Default: 30
+    Description: Maximum entry capacity for IPv4 prefix list (Cloudflare currently has ~15 CIDRs).
+
+  MaxEntriesIPv6:
+    Type: Number
+    Default: 15
+    Description: Maximum entry capacity for IPv6 prefix list (Cloudflare currently has ~7 CIDRs).
+
+  SafetyThreshold:
+    Type: Number
+    Default: 3
+    Description: Maximum allowed CIDR removals per reconciliation before failing closed.
+
+  ScheduleExpression:
+    Type: String
+    Default: rate(6 hours)
+    Description: EventBridge Scheduler schedule expression (e.g., rate(6 hours) or cron(0 0 * * ? *)).
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: (Optional) Email address to receive immediate SNS alerts when Cloudflare IP ranges change.
+
+  LambdaFunctionName:
+    Type: String
+    Default: cf-whitelisting-reconciliation
+    Description: Name of the reconciliation Lambda function.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 730]
+    Description: Number of days to retain CloudWatch logs.
+
+Conditions:
+  ShouldCreatePrefixLists: !Equals [!Ref CreatePrefixLists, 'true']
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+Resources:
+  # ----------------------------------------------------------------------------
+  # Customer-Managed Prefix Lists (Optional creation based on parameter)
+  # ----------------------------------------------------------------------------
+  CloudflarePrefixListIPv4:
+    Type: AWS::EC2::PrefixList
+    Condition: ShouldCreatePrefixLists
+    Properties:
+      PrefixListName: !Ref PrefixListNameIPv4
+      AddressFamily: IPv4
+      MaxEntries: !Ref MaxEntriesIPv4
+      Tags:
+        - Key: Name
+          Value: !Ref PrefixListNameIPv4
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: compliance-automation
+
+  CloudflarePrefixListIPv6:
+    Type: AWS::EC2::PrefixList
+    Condition: ShouldCreatePrefixLists
+    Properties:
+      PrefixListName: !Ref PrefixListNameIPv6
+      AddressFamily: IPv6
+      MaxEntries: !Ref MaxEntriesIPv6
+      Tags:
+        - Key: Name
+          Value: !Ref PrefixListNameIPv6
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: compliance-automation
+
+  # ----------------------------------------------------------------------------
+  # Amazon SNS Topic & Optional Email Subscription
+  # ----------------------------------------------------------------------------
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-cloudflare-prefix-list-updates'
+      DisplayName: Cloudflare Prefix List Reconcile Alerts
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: compliance-automation
+
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      TopicArn: !Ref SNSTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # ----------------------------------------------------------------------------
+  # CloudWatch Log Group
+  # ----------------------------------------------------------------------------
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${LambdaFunctionName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ----------------------------------------------------------------------------
+  # IAM Execution Role for Lambda Function
+  # ----------------------------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${LambdaFunctionName}'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${LambdaFunctionName}:*'
+        - PolicyName: DescribePrefixListsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeManagedPrefixLists
+                  - ec2:GetManagedPrefixListEntries
+                Resource: '*'
+        - PolicyName: ModifyManagedPrefixListsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:ModifyManagedPrefixList
+                  - ec2:CreateTags
+                Resource:
+                  - !If
+                    - ShouldCreatePrefixLists
+                    - !GetAtt CloudflarePrefixListIPv4.Arn
+                    - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:prefix-list/${ExistingPrefixListIdV4}'
+                  - !If
+                    - ShouldCreatePrefixLists
+                    - !GetAtt CloudflarePrefixListIPv6.Arn
+                    - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:prefix-list/${ExistingPrefixListIdV6}'
+        - PolicyName: PublishToSNSTopicAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SNSTopic
+
+  # ----------------------------------------------------------------------------
+  # AWS Lambda Reconciliation Function
+  # ----------------------------------------------------------------------------
+  ReconciliationLambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - LambdaExecutionRole
+      - LambdaLogGroup
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Description: Safely synchronizes Cloudflare proxy IPs into AWS Managed Prefix Lists with fail-closed checks
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          PREFIX_LIST_ID_V4: !If [ShouldCreatePrefixLists, !Ref CloudflarePrefixListIPv4, !Ref ExistingPrefixListIdV4]
+          PREFIX_LIST_ID_V6: !If [ShouldCreatePrefixLists, !Ref CloudflarePrefixListIPv6, !Ref ExistingPrefixListIdV6]
+          SNS_TOPIC_ARN: !Ref SNSTopic
+          SAFETY_THRESHOLD: !Ref SafetyThreshold
+          AWS_REGION: !Ref AWS::Region
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: compliance-automation
+
+  # ----------------------------------------------------------------------------
+  # EventBridge Scheduler Execution Role
+  # ----------------------------------------------------------------------------
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-scheduler-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaFunction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ReconciliationLambdaFunction.Arn
+
+  # ----------------------------------------------------------------------------
+  # EventBridge Scheduler Schedule
+  # ----------------------------------------------------------------------------
+  ReconciliationSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${AWS::StackName}-reconcile-schedule'
+      Description: Periodic schedule triggering Cloudflare prefix list reconciliation
+      ScheduleExpression: !Ref ScheduleExpression
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt ReconciliationLambdaFunction.Arn
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 3600
+
+# ------------------------------------------------------------------------------
+# Stack Outputs
+# ------------------------------------------------------------------------------
+Outputs:
+  PrefixListIPv4Id:
+    Description: Managed Prefix List ID for IPv4 (attach to Security Groups on port 80/443)
+    Value: !If [ShouldCreatePrefixLists, !Ref CloudflarePrefixListIPv4, !Ref ExistingPrefixListIdV4]
+    Export:
+      Name: !Sub '${AWS::StackName}-PrefixList-IPv4-Id'
+
+  PrefixListIPv6Id:
+    Description: Managed Prefix List ID for IPv6 (attach to Security Groups on port 80/443)
+    Value: !If [ShouldCreatePrefixLists, !Ref CloudflarePrefixListIPv6, !Ref ExistingPrefixListIdV6]
+    Export:
+      Name: !Sub '${AWS::StackName}-PrefixList-IPv6-Id'
+
+  SNSTopicArn:
+    Description: Amazon SNS Topic ARN receiving alerts on Cloudflare IP range changes
+    Value: !Ref SNSTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSTopic-Arn'
+
+  LambdaFunctionArn:
+    Description: Reconciliation Lambda Function ARN
+    Value: !GetAtt ReconciliationLambdaFunction.Arn
+
+  ScheduleArn:
+    Description: Amazon EventBridge Scheduler Schedule ARN
+    Value: !GetAtt ReconciliationSchedule.Arn
