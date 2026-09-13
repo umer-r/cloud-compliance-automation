@@ -46,7 +46,7 @@ Implementing origin lockdown via managed prefix lists and automated reconciliati
 
 ## 3. Architecture & Data Flow
 
-[workflow diagram](./docs/workflow_diagram.jpeg)
+![workflow diagram](https://raw.githubusercontent.com/umer-r/cloud-compliance-automation/refs/heads/main/aws/cf-whitelisting-reconciliation/docs/workflow_diagram.jpeg)
 
 ---
 
