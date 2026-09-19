@@ -81,101 +81,162 @@ Configure these environment variables in your AWS Lambda function configuration:
 | `PREFIX_LIST_ID_V6` | Optional* | None | AWS Managed Prefix List ID for IPv6 (e.g., `pl-xyz`). |
 | `SNS_TOPIC_ARN` | Optional | None | ARN of the Amazon SNS topic to publish alerts when IP changes are reconciled. |
 | `SAFETY_THRESHOLD` | Optional | `3` | Maximum number of CIDR removals permitted in a single run before failing closed. |
-| `AWS_REGION` | Optional | `eu-west-2` | AWS region where the prefix lists and Lambda function reside. |
+| `AWS_REGION` | Optional | `us-east-1` | AWS region where the prefix lists and Lambda function reside. |
 
 *\*Note: At least one of `PREFIX_LIST_ID_V4` or `PREFIX_LIST_ID_V6` must be defined.*
 
 ---
 
-## 6. IAM Permissions
+## 6. IAM Roles & Policies
 
-The Lambda execution role requires minimum privileges to inspect and modify only the targeted prefix lists, publish to the designated SNS topic, and write CloudWatch logs:
-
-```json
-{
+### 1. Lambda Execution Role
+* **Trust Policy**:
+  ```json
+  {
     "Version": "2012-10-17",
     "Statement": [
-        {
-            "Sid": "CloudWatchLogs",
-            "Effect": "Allow",
-            "Action": [
-                "logs:CreateLogGroup",
-                "logs:CreateLogStream",
-                "logs:PutLogEvents"
-            ],
-            "Resource": [
-                "arn:aws:logs:eu-west-2:<acc_id>:log-group:/aws/lambda/cf-whitelisting-reconciliation",
-                "arn:aws:logs:eu-west-2:<acc_id>:log-group:/aws/lambda/cf-whitelisting-reconciliation:*"
-            ]
-        },
-        {
-            "Sid": "DescribePrefixLists",
-            "Effect": "Allow",
-            "Action": [
-                "ec2:DescribeManagedPrefixLists",
-                "ec2:GetManagedPrefixListEntries"
-            ],
-            "Resource": "*"
-        },
-        {
-            "Sid": "ModifyCloudflarePrefixLists",
-            "Effect": "Allow",
-            "Action": [
-                "ec2:ModifyManagedPrefixList",
-                "ec2:CreateTags"
-            ],
-            "Resource": [
-                "arn:aws:ec2:eu-west-2:<acc_id>:prefix-list/pl-id",
-                "arn:aws:ec2:eu-west-2:<acc_id>:prefix-list/pl-id"
-            ]
-        },
-        {
-            "Sid": "PublishToSNSTopic",
-            "Effect": "Allow",
-            "Action": [
-                "sns:Publish"
-            ],
-            "Resource": [
-                "arn:aws:sns:eu-west-2:<acc_id>:<sns-topic>"
-            ]
-        }
+      {
+        "Effect": "Allow",
+        "Principal": { "Service": "lambda.amazonaws.com" },
+        "Action": "sts:AssumeRole"
+      }
     ]
-}
-```
+  }
+  ```
+* **Permissions Policy**:
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "CloudWatchLogs",
+        "Effect": "Allow",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:<region>:<account-id>:log-group:/aws/lambda/cf-whitelisting-reconciliation",
+          "arn:aws:logs:<region>:<account-id>:log-group:/aws/lambda/cf-whitelisting-reconciliation:*"
+        ]
+      },
+      {
+        "Sid": "DescribePrefixLists",
+        "Effect": "Allow",
+        "Action": [
+          "ec2:DescribeManagedPrefixLists",
+          "ec2:GetManagedPrefixListEntries"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "ModifyCloudflarePrefixLists",
+        "Effect": "Allow",
+        "Action": [
+          "ec2:ModifyManagedPrefixList",
+          "ec2:CreateTags"
+        ],
+        "Resource": [
+          "arn:aws:ec2:<region>:<account-id>:prefix-list/<ipv4-prefix-list-id>",
+          "arn:aws:ec2:<region>:<account-id>:prefix-list/<ipv6-prefix-list-id>"
+        ]
+      },
+      {
+        "Sid": "PublishToSNSTopic",
+        "Effect": "Allow",
+        "Action": ["sns:Publish"],
+        "Resource": "arn:aws:sns:<region>:<account-id>:<sns-topic-name>"
+      }
+    ]
+  }
+  ```
+
+### 2. EventBridge Scheduler Role
+* **Trust Policy**:
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": { "Service": "scheduler.amazonaws.com" },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  }
+  ```
+* **Permissions Policy**:
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "InvokeLambda",
+        "Effect": "Allow",
+        "Action": ["lambda:InvokeFunction"],
+        "Resource": "arn:aws:lambda:<region>:<account-id>:function:cf-whitelisting-reconciliation"
+      }
+    ]
+  }
+  ```
 
 ---
 
 ## 7. Deployment Options
 
-### Console Deployment
+### Option A: Automated Terraform Deployment (Recommended)
 
-#### Step 1: Create the Managed Prefix Lists
-Create two Customer-Managed Prefix Lists in the AWS VPC Console (or via AWS CLI):
-* **Cloudflare-IPv4**: Address family `IPv4`, Max entries `30` (Cloudflare currently has ~15-20 IPv4 CIDRs).
-* **Cloudflare-IPv6**: Address family `IPv6`, Max entries `15` (Cloudflare currently has ~7 IPv6 CIDRs).
+The [`./terraform/`](./terraform/) directory contains a complete configuration that automatically packages `lambda_function.py` and deploys all required resources.
 
-#### Step 2: Create the Amazon SNS Topic
-1. Create a Standard SNS Topic (e.g., `cloudflare-prefix-list-updates`).
-2. Subscribe your SecOps distribution list, Slack webhook integration, or PagerDuty service to the topic.
-3. Note the Topic ARN.
+```bash
+cd terraform
 
-#### Step 3: Deploy the Lambda Function
-1. Create a Python 3.11+ Lambda function named `cf-whitelisting-reconciliation`.
-2. Attach an IAM role using the policy template in [`cf-whitelisting-reconciliation-lambda-role.json`](./cf-whitelisting-reconciliation-lambda-role.json) (replace `<acc_id>` with your AWS Account ID).
-3. Paste the contents of [`lambda_function.py`](./lambda_function.py).
-4. Configure the environment variables (`PREFIX_LIST_ID_V4`, `PREFIX_LIST_ID_V6`, `SNS_TOPIC_ARN`, etc.).
-5. Set the Lambda timeout to `30 seconds`.
+# Initialize providers
+terraform init
 
-#### Step 4: Configure EventBridge Scheduler
-1. Navigate to **Amazon EventBridge** > **Schedules**.
-2. Create a recurring schedule (e.g., `rate(6 hours)` or `cron(0 0 * * ? *)`).
-3. Set the target to your Lambda function `cf-whitelisting-reconciliation`.
+# Deploy the stack
+terraform apply
+```
+
+#### SNS Behavior in Terraform:
+* **Default (`utilise_sns = true`, `create_sns = true`)**: Provisions a new SNS topic (`cloudflare-prefix-list-updates`) and alerts on changes.
+* **Use Existing SNS Topic**:
+  ```bash
+  terraform apply -var="create_sns=false" -var="existing_sns_topic_arn=arn:aws:sns:us-east-1:123456789012:my-topic"
+  ```
+* **Disable SNS Entirely**:
+  ```bash
+  terraform apply -var="utilise_sns=false"
+  ```
+  *(Skips SNS creation and sets `SNS_TOPIC_ARN` to empty, disabling publishing).*
+
+---
+
+### Option B: Manual Console Deployment
+
+1. **Create Prefix Lists**: In VPC Console, create two Customer-Managed Prefix Lists:
+   * **IPv4**: Max entries `30`.
+   * **IPv6**: Max entries `15`.
+2. **(Optional) Create SNS Topic**: In SNS Console, create a Standard Topic (`cloudflare-prefix-list-updates`) and subscribe your notification endpoint.
+3. **Create IAM Roles**: Using the policies in [Section 6](#6-iam-roles--policies):
+   * Create `cf-whitelisting-reconciliation-execution-role` for Lambda.
+   * Create `cf-whitelisting-reconciliation-scheduler-role` for EventBridge Scheduler.
+4. **Deploy Lambda Function**:
+   * Create function `cf-whitelisting-reconciliation` with Python 3.12 runtime and attach the Lambda IAM role.
+   * Paste [`lambda_function.py`](./lambda_function.py) into the code editor.
+   * Set environment variables: `PREFIX_LIST_ID_V4`, `PREFIX_LIST_ID_V6`, `SNS_TOPIC_ARN` (optional), and `SAFETY_THRESHOLD` (`3`).
+   * Set function timeout to `30 seconds`.
+5. **Configure EventBridge Schedule**:
+   * In EventBridge Scheduler, create a schedule with recurring expression `rate(6 hours)`.
+   * Target: `cf-whitelisting-reconciliation` Lambda function.
+   * Execution Role: `cf-whitelisting-reconciliation-scheduler-role`.
 
 ---
 
 ## 8. Enforce in Security Groups
 
-Once prefix lists are provisioned (via CloudFormation or manually):
+Once prefix lists are provisioned (via Terraform or manually):
 1. Open the Security Group attached to your ALB or EC2 origin.
 2. Remove any existing inbound rules permitting `0.0.0.0/0` on ports `80` and `443`.
 3. Add inbound rules:

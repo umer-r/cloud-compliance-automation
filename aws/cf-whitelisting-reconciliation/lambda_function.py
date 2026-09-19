@@ -304,7 +304,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise FailClosedError(f"Invalid SAFETY_THRESHOLD={safety_raw!r}") from exc
 
-    region = _env("AWS_REGION") or _env("AWS_DEFAULT_REGION") or "eu-west-2"
+    region = _env("AWS_REGION") or _env("AWS_DEFAULT_REGION") or "us-east-1"
     ec2 = boto3.client("ec2", region_name=region)
 
     logger.info("Fetching Cloudflare IP ranges from %s", CLOUDFLARE_IPS_URL)
