@@ -2,3 +2,12 @@
 *.zip
 *.log
 *.DS_Store
+
+# tf
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+*tfplan*
